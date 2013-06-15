@@ -13,11 +13,8 @@ namespace TeluguMatrimonyScrapper
 {
     class Program
     {
-        private const string Usage = "TeluguMatrimonyScrapper.exe <config file> \n OR \n TeluguMatrimonyScrapper.exe -FillMissing <config file> <tsv file>";
-        private static string ConfigFileName;
-        private static string InputTsvFileName;
-        private static bool MissFilling = false;
-
+        private const string Usage = "TeluguMatrimonyScrapper.exe -Config=<config file> -Output=<output tsv file>\n OR \nTeluguMatrimonyScrapper.exe [-FillMissing|-Update|-UpdateOnly] -Config=<config file> -Input=<Input tsv file> -Output=<output tsv file>";
+        
         private static Regex TNoRegex = new Regex("\\((T\\d+)\\)", RegexOptions.Compiled);
         private static Regex searchTNoListRegex = new Regex("\"perpage_ids\"\\s*:\\s*\"([T\\d,]+)\"", RegexOptions.Compiled);
 
@@ -66,16 +63,20 @@ namespace TeluguMatrimonyScrapper
                                                                 "Total Score",
                                                                             };
 
+        private static Dictionary<string, string> CommandLineParms = new Dictionary<string, string>();
         private static Dictionary<string, string> ConfigParams = new Dictionary<string, string>();
         private static Dictionary<string, string> UserBirthPlaceDetails = new Dictionary<string, string>();
         private static DateTime UserBirthDateTime;
         
         static void Main(string[] args)
         {
-            ParseCommandLineParams(args);
+            if (!ParseCommandLineParams(args))
+            {
+                return;
+            }
             
             // reading the input config file
-            ConfigParams = ReadConfig(ConfigFileName);
+            ConfigParams = ReadConfig(CommandLineParms["config"]);
 
             // login the user.
             if (ConfigParams.ContainsKey("TNo") && ConfigParams.ContainsKey("Password"))
@@ -89,12 +90,17 @@ namespace TeluguMatrimonyScrapper
             Dictionary<string, Dictionary<string, string>> candidateInfo = new Dictionary<string, Dictionary<string, string>>();
             Dictionary<string, string> candidateHoroscope = new Dictionary<string, string>();
             Dictionary<string, Tuple<string, string>> matchScores = new Dictionary<string, Tuple<string, string>>();
+            List<string> ExistingTNos = new List<string>();
+
+            bool fillMissing = CommandLineParms.ContainsKey("fillmissing") && CommandLineParms["fillmissing"] == "true";
+            bool update = CommandLineParms.ContainsKey("update") && CommandLineParms["update"] == "true";
+            bool updateOnly = CommandLineParms.ContainsKey("updateonly") && CommandLineParms["updateonly"] == "true";
                         
             // If it is Fill missing values mode, search is not performed
-            if (MissFilling)
+            if (fillMissing||update||updateOnly)
             {
                 // Reading from the input file
-                using (StreamReader inputReader = new StreamReader(InputTsvFileName))
+                using (StreamReader inputReader = new StreamReader(CommandLineParms["input"]))
                 {
                     string line;
                     // skipping the first line as it contains the header
@@ -108,45 +114,78 @@ namespace TeluguMatrimonyScrapper
                             Console.Error.WriteLine(String.Format("Input line has invalid columns : {0}", line));
                         }
                         string TNo = inputColumns[0];
-                        GetProfileData(TNo, inputColumns, out candidateInfo, out candidateHoroscope, out matchScores);
+                        ExistingTNos.Add(TNo);
+                        if (fillMissing)
+                        {
+                            GetProfileData(TNo, inputColumns, out candidateInfo, out candidateHoroscope, out matchScores);
+                            PrintOutputLine(TNo, candidateInfo, candidateHoroscope, matchScores);
+                        }
+                        if (update && !updateOnly)
+                        {
+                            PrintOutputLine(line.Trim('\n').Trim('\r'));
+                        }
+                        
+                    }
+                }
+            }
+            if(!fillMissing)
+            {
+                // Getting all the Tno's to scrape based on search
+                IEnumerable<string> TNos = GetSearchTNos();
+                foreach (string TNo in TNos)
+                {
+                    if (!ExistingTNos.Contains(TNo))
+                    {
+                        GetProfileData(TNo, null, out candidateInfo, out candidateHoroscope, out matchScores);
                         PrintOutputLine(TNo, candidateInfo, candidateHoroscope, matchScores);
                     }
                 }
             }
-            else
-            {
-                // Getting all the Tno's to scrape based on search
-                IEnumerable<string> TNos = GetSearchTNos();
-
-                foreach (string TNo in TNos)
-                {
-                    GetProfileData(TNo, null, out candidateInfo, out candidateHoroscope, out matchScores);
-                    PrintOutputLine(TNo, candidateInfo, candidateHoroscope, matchScores);
-                }
-            }
         }
 
-        private static void ParseCommandLineParams(string[] args)
+        private static bool ParseCommandLineParams(string[] args)
         {
             if (args.Length == 0)
             {
-                throw new Exception(Usage);
+                Console.Error.WriteLine(Usage);
+                return false;
             }
-            if (args[0].ToLower() == "-fillmissing")
+            foreach (string arg in args)
             {
-                if (args.Length < 3)
+                if(!arg.StartsWith("-"))
                 {
-                    throw new Exception(Usage);
+                    Console.Error.WriteLine("Invalid parameter " + arg);
+                    Console.Error.WriteLine(Usage);
+                    return false;
                 }
-                ConfigFileName = args[1];
-                InputTsvFileName = args[2];
-                MissFilling = true;
+                else if (arg.Contains("="))
+                {
+                    CommandLineParms[arg.Replace("-","").Split('=')[0].ToLower()] = arg.Replace("-","").Split('=')[1];
+                }
+                else
+                {
+                    CommandLineParms[arg.Replace("-", "").ToLower()] = "true";
+                }
             }
-            else
+
+            if (CommandLineParms.ContainsKey("fillmissing") || CommandLineParms.ContainsKey("update"))
             {
-                ConfigFileName = args[0];
+                if (!CommandLineParms.ContainsKey("input"))
+                {
+                    Console.Error.WriteLine("Missing parameter input");
+                    Console.Error.WriteLine(Usage);
+                    return false;
+                }
             }
+            if (!CommandLineParms.ContainsKey("config"))
+            {
+                Console.Error.WriteLine("Missing parameter config");
+                Console.Error.WriteLine(Usage);
+                return false;
+            }
+            return true;
         }
+
         /// <summary>
         /// reads the required parameters from the config file
         /// </summary>
@@ -519,7 +558,20 @@ namespace TeluguMatrimonyScrapper
         private static void GetProfileData(string TNo, string[] inputColumns, out Dictionary<string, Dictionary<string, string>> candidateInfo, out Dictionary<string, string> candidateHoroscope, out Dictionary<string, Tuple<string, string>> matchScores)
         {
             candidateInfo = GetUserDetails(TNo);
-
+            // adding missing keys
+            if (!candidateInfo.ContainsKey("Personal Information_Basic Details"))
+            {
+                candidateInfo["Personal Information_Basic Details"] = new Dictionary<string, string>();
+            }
+            if (!candidateInfo.ContainsKey("Personal Information_Religious Information"))
+            {
+                candidateInfo["Personal Information_Religious Information"] = new Dictionary<string, string>();
+            }
+            if (!candidateInfo.ContainsKey("Personal Information_Location"))
+            {
+                candidateInfo["Personal Information_Location"] = new Dictionary<string, string>();
+            }
+            
             // overriding the provided input details
             if (inputColumns != null && !string.IsNullOrWhiteSpace(inputColumns[1]))
             {
@@ -634,6 +686,10 @@ namespace TeluguMatrimonyScrapper
                                                                         (matchScores.ContainsKey("Total"))? matchScores["Total"].Item2 : String.Empty,
                                                                     });
             Console.WriteLine(outputLine);
+        }
+        private static void PrintOutputLine(string line)
+        {
+            Console.WriteLine(line);
         }
     }    
 }
